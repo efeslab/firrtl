@@ -37,7 +37,6 @@ class InferResetsSpec extends FirrtlFlatSpec {
       |    y <= asFixedPoint(r, 0)
       |    z <= asAsyncReset(r)""".stripMargin
     )
-    println(result.getEmittedCircuit)
     result should containLine ("wire r : UInt<1>")
     result should containLine ("r <= a")
     result should containLine ("v <= asUInt(r)")

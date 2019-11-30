@@ -79,7 +79,6 @@ class CustomTransformSpec extends FirrtlFlatSpec {
       def inputForm = HighForm
       def outputForm = HighForm
       def execute(s: CircuitState) = {
-        println(name)
         s
       }
     }
