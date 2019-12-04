@@ -40,8 +40,12 @@ abstract class Stage extends Phase {
     Logger.makeScope(annotationsx) {
       Seq( new phases.AddDefaults,
            new phases.Checks,
+           new Phase { def transform(a: AnnotationSeq) = phases.TargetDirectoryEnterAnnotation(shell.applicationName) +: a },
+           new phases.TargetDirectoryManipulator,
            new Phase { def transform(a: AnnotationSeq) = run(a) },
-           new phases.WriteOutputAnnotations )
+           new phases.WriteOutputAnnotations,
+           new Phase { def transform(a: AnnotationSeq) = phases.TargetDirectoryExitAnnotation +: a },
+           new phases.TargetDirectoryManipulator )
         .map(phases.DeletedWrapper(_))
         .foldLeft(annotationsx)((a, p) => p.transform(a))
     }
