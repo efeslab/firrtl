@@ -1,7 +1,7 @@
 // See LICENSE for license details.
 
 package experiments
-package experiment0
+package experiment1
 
 // Compiler Infrastructure
 import firrtl.{Transform, LowForm, CircuitState, Utils}
@@ -37,7 +37,12 @@ class Ledger {
         case None => modulePortMap(name) = mutable.Set[String]()
         case Some(name) => name
       }
-      modulePortMap(name) += port.serialize
+
+      val pName = port.name toLowerCase
+
+      if (pName.contains("ready") || pName.contains("valid")) {
+        modulePortMap(name) += port.serialize
+      }
     }
   }
 
@@ -53,7 +58,7 @@ class Ledger {
 
   def serialize: String = {
     modules map { myName =>
-      s"$myName => ${modulePortMap(myName) mkString "\n\t"}"
+      s"$myName => ${if (modulePortMap(myName) isEmpty) "is not ready-valid" else modulePortMap(myName).size}}"
     } mkString "\n"
   }
 }
