@@ -137,13 +137,20 @@ class AnalyzeCircuit extends Transform {
      */
     m map walkSubmodules(state, ledger)
 
+    val modInfo = new ModuleSafetyInfo()
     /*
      * Now, we check this module.
      *
      * Step 1: determine if the module is stateful or not.
      */
-    val modInfo = new ModuleSafetyInfo()
     m map walkStatements(modInfo)
+
+    /*
+     * Step 2: If the module is stateful, check if it has a reset signal. If not,
+     * it is definitely unsafe.
+     *
+     * Trace back register and memory
+     */
 
     // Add the modInfo to the ledger
     ledger.addModule(m.name, modInfo)

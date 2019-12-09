@@ -4,11 +4,14 @@ package firrtl
 package analyses
 
 // Compiler Infrastructure
-import firrtl.{Transform, HighForm, CircuitState, Utils}
+import firrtl.{Transform, LowForm, CircuitState, Utils}
 // Firrtl IR classes
-import firrtl.ir.{DefModule, Port, Statement, DefInstance, DefRegister, DefMemory}
+import firrtl.ir._
 // Map functions
 import firrtl.Mappers._
+// Dependency graph
+import firrtl.graph._
+import firrtl.util.{DependencyGraph, LogicNode}
 // Scala's mutable collections
 import scala.collection.mutable
 
@@ -45,13 +48,14 @@ case class ModuleSafetyInfo(moduleName: String) {
   private val submodules = mutable.Set[String]()
   private val submoduleInfo = mutable.Map[String, ModuleSafetyInfo]()
 
-  // Tracking info about the 
+  // Tracking info about registers, so we can later do dependency analysis.
+  private val regDefs = mutable.Set[LogicNode]()
+  // Tracks nodes that aren't reset by the signal
+  private val resetSignal = mutable.Map[LogicNode, Set[LogicNode]]()
   
   // Safety information about the immediate module.
   private var hasMemory: Boolean = false
   private var hasRegisters: Boolean = false
-  private var incompleteReset: Option[Boolean] = None
-
 
   def updateSubmoduleInfo(submodule: DefModule, msi: ModuleSafetyInfo): Unit = {
     submodules += submodule.name
@@ -62,12 +66,43 @@ case class ModuleSafetyInfo(moduleName: String) {
     hasMemory = b
   }
 
-  def setHasRegisters(b: Boolean): Unit = {
-    hasRegisters = b
+  def addRegisterDef(r: DefRegister): Unit = {
+    hasRegisters = true
+    regDefs += LogicNode(moduleName, r.name)
   }
 
-  def setIncompleteReset(b: Boolean): Unit = {
-    incompleteReset = Option[Boolean](b)
+  /**
+   * So, we want to see if, for each register, does this source reset it?
+   */
+  def addResetSource(depGraph: DiGraph[LogicNode], source: LogicNode): Unit = {
+    if (!hasRegisters) return
+
+    val resetRegs = regDefs.filter({ case regDef =>
+       try {
+         val path = depGraph.path(source, regDef)
+         !path.isEmpty
+       } catch {
+         case x: PathNotFoundException => false
+         case x: Throwable => {
+           throw x
+           false
+         }
+       }
+    })
+
+    resetSignal(source) = (regDefs.toSet) -- (resetRegs.toSet)
+  }
+
+  def incompleteReset: Option[Boolean] = {
+    if (resetSignal.isEmpty) {
+      return None
+    } 
+
+    Option[Boolean](resetSignal.exists({ case (x, y) => y.isEmpty }))
+  }
+
+  def getRegDefs: Set[LogicNode] = {
+    regDefs toSet
   }
 
   /*
@@ -84,6 +119,7 @@ case class ModuleSafetyInfo(moduleName: String) {
 
   def serialize: String = {
     val is_safe = if (isSafe) "is safe" else "is not safe"
+    val submodule = if (isImmediatelyUnsafe) "because it" else "because one of its submodules"
     val state = if (hasMemory) {
       "has memory (inherently unsafe)"
     } else if (hasRegisters) {
@@ -100,7 +136,7 @@ case class ModuleSafetyInfo(moduleName: String) {
     } else {
       "is stateless"
     }
-    s"$moduleName $is_safe, because it $state"
+    s"$moduleName $is_safe, $submodule $state"
   }
 }
 
@@ -157,9 +193,9 @@ class Ledger {
   */
 class CheckSpeculativeSafety extends Transform {
   /** Requires the [[firrtl.ir.Circuit Circuit]] form to be "low" */
-  def inputForm = HighForm
+  def inputForm = LowForm
   /** Indicates the output [[firrtl.ir.Circuit Circuit]] form to be "low" */
-  def outputForm = HighForm
+  def outputForm = LowForm
 
   /** Called by [[firrtl.Compiler Compiler]] to run your pass. [[firrtl.CircuitState CircuitState]] contains the circuit
     * and its form, as well as other related data.
@@ -206,20 +242,43 @@ class CheckSpeculativeSafety extends Transform {
      * Now, we check this module.
      *
      * Step 1: determine if the module is stateful or not.
+     * Step 2: If the module is stateful, check if it has a reset signal. If not,
+     * it is definitely unsafe.
      */
     m map walkStatements(modInfo)
 
     /*
-     * Step 2: If the module is stateful, check if it has a reset signal. If not,
-     * it is definitely unsafe.
+     * Step 3: Find this module's reset signal, if it has one. If it does, 
+     * follow the dependency graph to see if all registers are connected to the
+     * top reset signal.
      *
-     * Trace back register and memory
+     * This is equivalent to finding a path from the top-level reset to the 
+     * reset signal of the register.
      */
+
+    val depGraph: DiGraph[LogicNode] = DependencyGraph(state.circuit)
+    m map traceRegisterResets(state, depGraph, m.name, modInfo)
 
     // Add the modInfo to the ledger
     ledger.addModule(m.name, modInfo)
 
     m
+  }
+
+  /**
+   * Implemented as a map over ports.
+   */
+  def traceRegisterResets(state: CircuitState, depGraph: DiGraph[LogicNode], 
+    moduleName: String, modInfo: ModuleSafetyInfo)(p: Port): Port = {
+
+    p match {
+      case Port(_, name, direction, _) if direction.serialize == "input" => {
+        modInfo.addResetSource(depGraph, LogicNode(moduleName, p.name))
+      }
+      case x => x
+    }
+
+    p
   }
 
   def walkSubmodules(state: CircuitState, ledger: Ledger)(s: Statement): Statement = {
@@ -243,15 +302,9 @@ class CheckSpeculativeSafety extends Transform {
 
   def walkStatements(modInfo: ModuleSafetyInfo)(s: Statement): Statement = {
     s match {
-      case r: DefRegister => {
-        modInfo.setHasRegisters(true)
-      }
-      case m: DefMemory => {
-        modInfo.setHasMemory(true)
-      }
-      case notStateful => {
-        notStateful
-      }
+      case r: DefRegister => modInfo.addRegisterDef(r)
+      case _: DefMemory => modInfo.setHasMemory(true)
+      case notStateful => notStateful
     }
 
     // But, statements can contain other statements!
