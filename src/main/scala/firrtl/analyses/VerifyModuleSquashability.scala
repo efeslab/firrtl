@@ -10,8 +10,9 @@ import firrtl.Mappers._
 import firrtl.annotations.transforms.AddResetSignalInformation
 import firrtl.analyses.CheckSpeculativeSafety
 
-/** 
-  *
+/** VerifyModuleSquashability SeqTransform
+  * 
+  * Composes
   */
 class VerifyModuleSquashability extends SeqTransform {
   def inputForm = MidForm

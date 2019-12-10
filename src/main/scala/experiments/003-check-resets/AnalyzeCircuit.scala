@@ -9,7 +9,6 @@ import firrtl._
 import firrtl.ir._
 // Map functions
 import firrtl.Mappers._
-import firrtl.util.DependencyGraph
 // Scala's mutable collections
 import scala.collection.mutable
 
@@ -131,7 +130,10 @@ class AnalyzeCircuit extends Transform {
         */
        //println(s"${r.reset}")
         r.reset match {
-          case (_: Reference | _: WRef) => println(s"${r.serialize}")
+          case (_: Reference | _: WRef) => {
+            println(s"${r.serialize}")
+            println(s"${r.reset.serialize}")
+          }
           case _ => ()
         }
       }

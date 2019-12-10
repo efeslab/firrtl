@@ -278,7 +278,13 @@ class CheckSpeculativeSafety extends Transform {
     * and its form, as well as other related data.
     */
   def execute(state: CircuitState): CircuitState = {
+    import firrtl.annotations.transforms._
+    val annotations = state.annotations.collect({case a: ResetSignalInfo => a})
+
+    annotations.foreach(x => println(x.serialize))
+
     return state
+
     val ledger = new Ledger()
     val circuit = state.circuit
 
