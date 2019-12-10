@@ -84,9 +84,9 @@ class Ledger {
   */
 class AnalyzeCircuit extends Transform {
   /** Requires the [[firrtl.ir.Circuit Circuit]] form to be "low" */
-  def inputForm = HighForm
+  def inputForm = MidForm
   /** Indicates the output [[firrtl.ir.Circuit Circuit]] form to be "low" */
-  def outputForm = HighForm
+  def outputForm = MidForm
 
   /** Called by [[firrtl.Compiler Compiler]] to run your pass. [[firrtl.CircuitState CircuitState]] contains the circuit
     * and its form, as well as other related data.
@@ -130,7 +130,10 @@ class AnalyzeCircuit extends Transform {
         })
         */
        //println(s"${r.reset}")
-
+        r.reset match {
+          case (_: Reference | _: WRef) => println(s"${r.serialize}")
+          case _ => ()
+        }
       }
       case _ => ()
     }

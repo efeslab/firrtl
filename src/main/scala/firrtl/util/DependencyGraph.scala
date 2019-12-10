@@ -1,7 +1,6 @@
 
 package firrtl
 
-import firrtl._
 import firrtl.ir._
 import firrtl.passes._
 import firrtl.annotations._
@@ -10,7 +9,6 @@ import firrtl.analyses.InstanceGraph
 import firrtl.Mappers._
 import firrtl.Utils.{throwInternalError, kind}
 import firrtl.MemoizedHash._
-import firrtl.options.{RegisteredTransform, ShellOption}
 
 import collection.mutable
 
@@ -149,7 +147,7 @@ package object util {
 
       // Add all ports as vertices
       mod.ports.foreach {
-        case Port(_, name, _, _) => depGraph.addVertex(LogicNode(mod.name, name))
+        case Port(_, name, _, _: GroundType) => depGraph.addVertex(LogicNode(mod.name, name))
         case other => {
           import scala.reflect.ClassTag
           

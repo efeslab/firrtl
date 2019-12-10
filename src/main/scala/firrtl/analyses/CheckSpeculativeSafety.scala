@@ -1,20 +1,5 @@
 // See LICENSE for license details.
 
-package firrtl
-package analyses
-
-// Compiler Infrastructure
-import firrtl.{Transform, LowForm, CircuitState, Utils}
-// Firrtl IR classes
-import firrtl.ir._
-// Map functions
-import firrtl.Mappers._
-// Dependency graph
-import firrtl.graph._
-import firrtl.util.{DependencyGraph, LogicNode}
-// Scala's mutable collections
-import scala.collection.mutable
-
 /**
   * For this experiment, I want to check for the following things per modules:
   * 1. Does this module (or any sub-modules) have any state?
@@ -40,10 +25,137 @@ import scala.collection.mutable
   *
   */
 
+package firrtl
+package analyses
+
+// Compiler Infrastructure
+import firrtl._
+// Firrtl IR classes
+import firrtl.ir._
+// Map functions
+import firrtl.Mappers._
+// Dependency graph
+import firrtl.graph._
+import firrtl.util.{DependencyGraph, LogicNode}
+// Other
+import firrtl.Utils.throwInternalError
+// Scala's mutable collections
+import scala.collection.mutable
+
+
+/**
+ * Tracks information about DefRegister reset signals and their sources.
+ *
+ * For a module's set of registers, we want to know the following:
+ *
+ * - Can the state be flash-cleared? We define flash clearing as the following:
+ *   1. All registers are reset only by a combination of module-level inputs.
+ *   2. There exists a satisfiable assignment of all signals that simultaneously
+ *   asserts all register resets.
+ *
+ */
+case class RegisterResetInfo(moduleName: String, depGraph: DiGraph[LogicNode]) {
+  private val regDefs = mutable.Set[LogicNode]()
+  private val regNames = mutable.Set[String]()
+  private val regResets = mutable.Set[LogicNode]()
+  private val regResetExpr = mutable.Set[Expression]()
+  private val regAssign = mutable.Set[LogicNode]()
+  private val inputPorts = mutable.Set[LogicNode]()
+  private val inputNames = mutable.Set[String]()
+  
+  def addRegisterDef(r: DefRegister): Unit = {
+    regDefs += LogicNode(moduleName, r.name)
+    if (r.name == "id_reg_fence") println(s"${r.serialize}")
+    regNames += r.name
+    regResetExpr += r.reset
+    regResets ++= DependencyGraph.extractRefs(r.reset).map(e => LogicNode(moduleName, e))
+  }
+
+  def addRegAssignment(s: Statement): Unit = s match {
+    // "loc" should not be a nested expression
+    case Connect(_, loc, _) => regAssign += LogicNode(moduleName, loc)
+    case x => throwInternalError(s"I don't know how to handle '${x.serialize}'!")
+  }
+
+  def addInputPort(p: Port): Unit = p match {
+    case Port(_, name, direction, _) if direction.serialize == "input" => {
+      inputPorts += LogicNode(moduleName, p.name)
+      inputNames += p.name
+    }
+    case x => throwInternalError(s"'${x.serialize}' is not an input port!")
+  }
+
+  /**
+   * For each register, see if its definition reaches any other register reset
+   * assignment. If so, that register depends on this register.
+   *
+   * Do this analysis for each register definition.
+   */
+  private def regRegDepsExist: Boolean = {
+    def regDependsOn(x: LogicNode): Boolean = {
+      val regReaches = depGraph.reachableFrom(x)
+      !(regReaches intersect regResets).isEmpty
+    }
+
+    !regDefs.filter(regDependsOn).isEmpty
+  }
+
+  /**
+   * For each register definition, determine if the assignment of module inputs
+   * to the register is satisfiable.
+   */
+  private def regAssignmentsSat: Boolean = {
+    throwInternalError("TODO: Implement!")
+    false
+  }
+
+  /**
+   * This is a simplier check: are the reset port definitions directly connected
+   * to the inputs?
+   */
+  private def regResetDirect: Boolean = {
+    regResetExpr.forall((e: Expression) => e match {
+      case Reference(name, _) if inputNames.contains(name) => true
+      case WRef(name, _, _, _) if inputNames.contains(name) => true
+      case _: Literal => false
+      case x => {
+        import scala.reflect.ClassTag
+        
+        def f[T](v: T)(implicit ev: ClassTag[T]) = ev.toString
+        throwInternalError(s"Don't know what to do with ${f(x)} '${x.serialize}'!")
+      }
+    })
+  }
+
+  /** 
+   * For each register definition, first determine if the resets are even 
+   * reachable.
+   */
+  private def regResetsConnected: Boolean = {
+    regResets.forall(l => depGraph.contains(l))
+  }
+
+  def getRegNames: Set[String] = regNames.toSet
+
+  def hasRegs: Boolean = !regDefs.isEmpty
+
+  def isSafe: Boolean = {
+    regDefs.isEmpty || (regResetsConnected && !regRegDepsExist && regResetDirect)
+  }
+
+  def serialize: String = {
+    if (regDefs.isEmpty) "has no registers"
+    else if (!regResetsConnected) "has registers with disconnected resets"
+    else if (regRegDepsExist) "has register-register reset dependencies"
+    else if (!regResetDirect) "has indirect reset signals for registers"
+    else "has NO clue!!!"
+  }
+}
+
 /*
  * This [[ModuleSafetyInfo]] class does some stuff.
  */
-case class ModuleSafetyInfo(moduleName: String) {
+case class ModuleSafetyInfo(moduleName: String, depGraph: DiGraph[LogicNode]) {
   // Tracking info about submodules
   private val submodules = mutable.Set[String]()
   private val submoduleInfo = mutable.Map[String, ModuleSafetyInfo]()
@@ -52,10 +164,10 @@ case class ModuleSafetyInfo(moduleName: String) {
   private val regDefs = mutable.Set[LogicNode]()
   // Tracks nodes that aren't reset by the signal
   private val resetSignal = mutable.Map[LogicNode, Set[LogicNode]]()
+  private val regInfo = new RegisterResetInfo(moduleName, depGraph)
   
   // Safety information about the immediate module.
   private var hasMemory: Boolean = false
-  private var hasRegisters: Boolean = false
 
   def updateSubmoduleInfo(submodule: DefModule, msi: ModuleSafetyInfo): Unit = {
     submodules += submodule.name
@@ -66,50 +178,20 @@ case class ModuleSafetyInfo(moduleName: String) {
     hasMemory = b
   }
 
-  def addRegisterDef(r: DefRegister): Unit = {
-    hasRegisters = true
-    regDefs += LogicNode(moduleName, r.name)
+  def addRegisterDef(r: DefRegister): Unit = regInfo.addRegisterDef(r)
+  def addRegAssign(s: Statement): Unit = s match {
+    case Connect(_, loc, _) => {
+      if (regInfo.getRegNames.contains(loc.serialize)) regInfo.addRegAssignment(s)
+    }
+    case x => ()
   }
-
-  /**
-   * So, we want to see if, for each register, does this source reset it?
-   */
-  def addResetSource(depGraph: DiGraph[LogicNode], source: LogicNode): Unit = {
-    if (!hasRegisters) return
-
-    val resetRegs = regDefs.filter({ case regDef =>
-       try {
-         val path = depGraph.path(source, regDef)
-         !path.isEmpty
-       } catch {
-         case x: PathNotFoundException => false
-         case x: Throwable => {
-           throw x
-           false
-         }
-       }
-    })
-
-    resetSignal(source) = (regDefs.toSet) -- (resetRegs.toSet)
-  }
-
-  def incompleteReset: Option[Boolean] = {
-    if (resetSignal.isEmpty) {
-      return None
-    } 
-
-    Option[Boolean](resetSignal.exists({ case (x, y) => y.isEmpty }))
-  }
-
-  def getRegDefs: Set[LogicNode] = {
-    regDefs toSet
-  }
+  def addInputPort(p: Port): Unit = regInfo.addInputPort(p)
 
   /*
    * "Immediately" means the immediate module, i.e. excluding submodules.
    */
   def isImmediatelyUnsafe: Boolean = {
-    hasMemory || (hasRegisters && incompleteReset.getOrElse(true)) 
+    hasMemory || !regInfo.isSafe
   }
 
   def isSafe: Boolean = {
@@ -119,24 +201,19 @@ case class ModuleSafetyInfo(moduleName: String) {
 
   def serialize: String = {
     val is_safe = if (isSafe) "is safe" else "is not safe"
-    val submodule = if (isImmediatelyUnsafe) "because it" else "because one of its submodules"
+    val submodule = if (isImmediatelyUnsafe || submodules.isEmpty) "because it" else "because one of its submodules"
     val state = if (hasMemory) {
       "has memory (inherently unsafe)"
-    } else if (hasRegisters) {
-      incompleteReset match {
-        case None => "has registers, and you didn't run reset analysis"
-        case Some(x) => {
-          if (x) {
-            "has registers which are not reset completely" 
-          } else {
-            "has registers which are completely reset"
-          }
-        }
-      }
+    } else if (regInfo.hasRegs) {
+      regInfo.serialize
     } else {
       "is stateless"
     }
-    s"$moduleName $is_safe, $submodule $state"
+    val subs = submodules map { case modName =>
+      s"\t\tsubmodule $modName"
+    } mkString "\n"
+    val verbose = s"(is immediately unsafe=${isImmediatelyUnsafe}, nsubmodules=${submodules.size}, regstate=${regInfo.serialize})\n$subs"
+    s"$moduleName $is_safe, $submodule $state\n\t$verbose"
   }
 }
 
@@ -201,6 +278,7 @@ class CheckSpeculativeSafety extends Transform {
     * and its form, as well as other related data.
     */
   def execute(state: CircuitState): CircuitState = {
+    return state
     val ledger = new Ledger()
     val circuit = state.circuit
 
@@ -237,7 +315,8 @@ class CheckSpeculativeSafety extends Transform {
      */
     m map walkSubmodules(state, ledger)
 
-    val modInfo = new ModuleSafetyInfo(m.name)
+    val depGraph: DiGraph[LogicNode] = DependencyGraph(state.circuit)
+    val modInfo = new ModuleSafetyInfo(m.name, depGraph)
     /*
      * Now, we check this module.
      *
@@ -256,8 +335,7 @@ class CheckSpeculativeSafety extends Transform {
      * reset signal of the register.
      */
 
-    val depGraph: DiGraph[LogicNode] = DependencyGraph(state.circuit)
-    m map traceRegisterResets(state, depGraph, m.name, modInfo)
+    m map walkPorts(state, depGraph, m.name, modInfo)
 
     // Add the modInfo to the ledger
     ledger.addModule(m.name, modInfo)
@@ -268,12 +346,12 @@ class CheckSpeculativeSafety extends Transform {
   /**
    * Implemented as a map over ports.
    */
-  def traceRegisterResets(state: CircuitState, depGraph: DiGraph[LogicNode], 
+  def walkPorts(state: CircuitState, depGraph: DiGraph[LogicNode], 
     moduleName: String, modInfo: ModuleSafetyInfo)(p: Port): Port = {
 
     p match {
       case Port(_, name, direction, _) if direction.serialize == "input" => {
-        modInfo.addResetSource(depGraph, LogicNode(moduleName, p.name))
+        modInfo.addInputPort(p)
       }
       case x => x
     }
@@ -304,6 +382,7 @@ class CheckSpeculativeSafety extends Transform {
     s match {
       case r: DefRegister => modInfo.addRegisterDef(r)
       case _: DefMemory => modInfo.setHasMemory(true)
+      case x @ (_: Connect) => modInfo.addRegAssign(x)
       case notStateful => notStateful
     }
 
