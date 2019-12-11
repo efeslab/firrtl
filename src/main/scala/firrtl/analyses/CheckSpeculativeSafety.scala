@@ -58,33 +58,13 @@ import scala.collection.mutable
 case class RegisterResetInfo(moduleName: String, 
                              depGraph: DiGraph[LogicNode],
                              resetSignalInfo: Map[String, ResetSignalInfo]) {
-  private val regDefs = mutable.Set[LogicNode]()
-  private val regNames = mutable.Set[String]()
-  private val regResets = mutable.Set[LogicNode]()
-  private val regResetExpr = mutable.Set[Expression]()
-  private val regAssign = mutable.Set[LogicNode]()
   private val inputPorts = mutable.Set[LogicNode]()
   private val inputNames = mutable.Set[String]()
+
+  private var hasRegs: Boolean = false
+  private var hasUnclearValue: Boolean = false
+  private var hasIndirectReset: Boolean = false
   
-  def addRegisterDef(r: DefRegister): Unit = {
-    if (resetSignalInfo contains r.name) {
-      regDefs += LogicNode(moduleName, r.name)
-      regNames += r.name
-      val resetExpr = resetSignalInfo(r.name).resetSignal
-      regResetExpr += resetExpr
-      regResets ++= DependencyGraph.extractRefs(resetExpr).map(e => LogicNode(moduleName, e))
-      println(s"+\t${r.name} in map")
-    } else {
-      println(s"-\t${r.name} not in map")
-    }
-  }
-
-  def addRegAssignment(s: Statement): Unit = s match {
-    // "loc" should not be a nested expression
-    case Connect(_, loc, _) => regAssign += LogicNode(moduleName, loc)
-    case x => throwInternalError(s"I don't know how to handle '${x.serialize}'!")
-  }
-
   def addInputPort(p: Port): Unit = p match {
     case Port(_, name, direction, _) if direction.serialize == "input" => {
       inputPorts += LogicNode(moduleName, p.name)
@@ -93,69 +73,44 @@ case class RegisterResetInfo(moduleName: String,
     case x => throwInternalError(s"'${x.serialize}' is not an input port!")
   }
 
-  /**
-   * For each register, see if its definition reaches any other register reset
-   * assignment. If so, that register depends on this register.
-   *
-   * Do this analysis for each register definition.
-   */
-  private def regRegDepsExist: Boolean = {
-    def regDependsOn(x: LogicNode): Boolean = {
-      val regReaches = depGraph.reachableFrom(x)
-      !(regReaches intersect regResets).isEmpty
+  def addRegisterDef(r: DefRegister): Unit = {
+    if (resetSignalInfo contains r.name) {
+      if (inputPorts.isEmpty) throwInternalError("Need to parse ports first!")
+
+      hasRegs = true
+
+      val resetExpr = resetSignalInfo(r.name).resetSignal
+      val initExpr = resetSignalInfo(r.name).initValue
+
+
+      hasUnclearValue ||= DependencyGraph.extractRefs(initExpr).exists(_ match {
+        case r: Literal => false
+        case e if (inputPorts contains LogicNode(moduleName, e)) => false
+        case _ => true    
+      })
+
+      hasIndirectReset ||= DependencyGraph.extractRefs(resetExpr).exists(_ match {
+        case l: Literal => true
+        case e if (inputPorts contains LogicNode(moduleName, e)) => false
+        case _ => true    
+      })
+
+      println(s"+\t${r.name} in map")
+    } else {
+      println(s"-\t${r.name} not in map")
     }
-
-    !regDefs.filter(regDependsOn).isEmpty
   }
 
-  /**
-   * For each register definition, determine if the assignment of module inputs
-   * to the register is satisfiable.
-   */
-  private def regAssignmentsSat: Boolean = {
-    throwInternalError("TODO: Implement!")
-    false
-  }
-
-  /**
-   * This is a simplier check: are the reset port definitions directly connected
-   * to the inputs?
-   */
-  private def regResetDirect: Boolean = {
-    regResetExpr.forall((e: Expression) => e match {
-      case Reference(name, _) if inputNames.contains(name) => true
-      case WRef(name, _, _, _) if inputNames.contains(name) => true
-      case _: Literal => false
-      case x => {
-        import scala.reflect.ClassTag
-        
-        def f[T](v: T)(implicit ev: ClassTag[T]) = ev.toString
-        throwInternalError(s"Don't know what to do with ${f(x)} '${x.serialize}'!")
-      }
-    })
-  }
-
-  /** 
-   * For each register definition, first determine if the resets are even 
-   * reachable.
-   */
-  private def regResetsConnected: Boolean = {
-    regResets.forall(l => depGraph.contains(l))
-  }
-
-  def getRegNames: Set[String] = regNames.toSet
-
-  def hasRegs: Boolean = !regDefs.isEmpty
+  def hasRegisters: Boolean = hasRegs
 
   def isSafe: Boolean = {
-    regDefs.isEmpty || (regResetsConnected && !regRegDepsExist && regResetDirect)
+    !hasRegs || (!hasIndirectReset && !hasUnclearValue)
   }
 
   def serialize: String = {
-    if (regDefs.isEmpty) "has no registers"
-    else if (!regResetsConnected) "has registers with disconnected resets"
-    else if (!regResetDirect) "has indirect reset signals for registers"
-    else if (regRegDepsExist) "has register-register reset dependencies"
+    if (!hasRegs) "has no registers"
+    else if (!hasIndirectReset) "has indirect reset signals for registers"
+    else if (!hasUnclearValue) "has unclear init values"
     else "has NO clue!!!"
   }
 }
@@ -171,9 +126,7 @@ case class ModuleSafetyInfo(moduleName: String,
   private val submoduleInfo = mutable.Map[String, ModuleSafetyInfo]()
 
   // Tracking info about registers, so we can later do dependency analysis.
-  private val regDefs = mutable.Set[LogicNode]()
   // Tracks nodes that aren't reset by the signal
-  private val resetSignal = mutable.Map[LogicNode, Set[LogicNode]]()
   private val regInfo = new RegisterResetInfo(moduleName, depGraph, regResetInfoMap)
   
   // Safety information about the immediate module.
@@ -189,12 +142,6 @@ case class ModuleSafetyInfo(moduleName: String,
   }
 
   def addRegisterDef(r: DefRegister): Unit = regInfo.addRegisterDef(r)
-  def addRegAssign(s: Statement): Unit = s match {
-    case Connect(_, loc, _) => {
-      if (regInfo.getRegNames.contains(loc.serialize)) regInfo.addRegAssignment(s)
-    }
-    case x => ()
-  }
   def addInputPort(p: Port): Unit = regInfo.addInputPort(p)
 
   /*
@@ -214,7 +161,7 @@ case class ModuleSafetyInfo(moduleName: String,
     val submodule = if (isImmediatelyUnsafe || submodules.isEmpty) "because it" else "because one of its submodules"
     val state = if (hasMemory) {
       "has memory (inherently unsafe)"
-    } else if (regInfo.hasRegs) {
+    } else if (regInfo.hasRegisters) {
       regInfo.serialize
     } else {
       "is stateless"
@@ -300,7 +247,10 @@ class CheckSpeculativeSafety extends Transform {
      *   - "map" - classic functional programming concept
      *   - discard the returned new [[firrtl.ir.Circuit Circuit]] because circuit is unmodified
      */
-    circuit map walkModule(state, ledger)
+    val depGraph: DiGraph[LogicNode] = DependencyGraph(state.circuit)
+    val annotations = state.annotations.collect(
+                      {case a: ResetSignalInfo => a}).map(a => a.regName -> a).toMap
+    circuit map walkModule(state, depGraph, annotations, ledger)
 
     // Print our ledger
     println(ledger.serialize)
@@ -310,7 +260,9 @@ class CheckSpeculativeSafety extends Transform {
   }
 
   /** Deeply visits every [[firrtl.ir.Statement Statement]] in m. */
-  def walkModule(state: CircuitState, ledger: Ledger)(m: DefModule): DefModule = {
+  def walkModule(state: CircuitState, depGraph: DiGraph[LogicNode], 
+                 annotations: Map[String, ResetSignalInfo], ledger: Ledger)
+                (m: DefModule): DefModule = {
     /*
      * Check if we've done this one before. If so, terminate.
      */
@@ -323,22 +275,18 @@ class CheckSpeculativeSafety extends Transform {
      * We do a depth-first search so we accumulate all the submodule information
      * before computing the safety of this module.
      */
-    m map walkSubmodules(state, ledger)
+    m map walkSubmodules(state, depGraph, annotations, ledger)
 
-    val depGraph: DiGraph[LogicNode] = DependencyGraph(state.circuit)
-    val annotations = state.annotations.collect(
-                      {case a: ResetSignalInfo => a}).map(a => a.regName -> a).toMap
     val modInfo = new ModuleSafetyInfo(m.name, depGraph, annotations)
+
+    m map walkPorts(state, depGraph, m.name, modInfo)
+    
     /*
      * Now, we check this module.
      *
      * Step 1: determine if the module is stateful or not.
      * Step 2: If the module is stateful, check if it has a reset signal. If not,
      * it is definitely unsafe.
-     */
-    m map walkStatements(modInfo)
-
-    /*
      * Step 3: Find this module's reset signal, if it has one. If it does, 
      * follow the dependency graph to see if all registers are connected to the
      * top reset signal.
@@ -346,8 +294,7 @@ class CheckSpeculativeSafety extends Transform {
      * This is equivalent to finding a path from the top-level reset to the 
      * reset signal of the register.
      */
-
-    m map walkPorts(state, depGraph, m.name, modInfo)
+    m map walkStatements(modInfo)
 
     // Add the modInfo to the ledger
     ledger.addModule(m.name, modInfo)
@@ -371,7 +318,9 @@ class CheckSpeculativeSafety extends Transform {
     p
   }
 
-  def walkSubmodules(state: CircuitState, ledger: Ledger)(s: Statement): Statement = {
+  def walkSubmodules(state: CircuitState, depGraph: DiGraph[LogicNode],
+                     annotations: Map[String, ResetSignalInfo], ledger: Ledger)
+                    (s: Statement): Statement = {
     /*
      * Examine the statement. If it is an instance statement, it instantiates a
      * module. We can extract the module and walk it from the circuit.
@@ -380,7 +329,7 @@ class CheckSpeculativeSafety extends Transform {
       case DefInstance(_, _, mName) => {
         state.circuit.modules.find(m => m.name == mName) match {
           case None => None
-          case Some(module) => walkModule(state, ledger)(module)
+          case Some(module) => walkModule(state, depGraph, annotations, ledger)(module)
         }
       }
       case notinst => notinst
@@ -394,7 +343,6 @@ class CheckSpeculativeSafety extends Transform {
     s match {
       case r: DefRegister => modInfo.addRegisterDef(r)
       case _: DefMemory => modInfo.setHasMemory(true)
-      case x @ (_: Connect) => modInfo.addRegAssign(x)
       case notStateful => notStateful
     }
 
