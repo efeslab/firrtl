@@ -20,5 +20,6 @@ class VerifyModuleSquashability extends SeqTransform {
 
   def transforms = Seq(
     new AddResetSignalInformation, 
+    new MiddleFirrtlToLowFirrtl,
     new CheckSpeculativeSafety)
 }
