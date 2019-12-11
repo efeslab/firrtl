@@ -49,7 +49,6 @@ package object util {
 
   object DependencyGraph {
 
-
     /** Expression used to represent outputs in the circuit (# is illegal in names) */
     private val circuitSink = LogicNode("#Top", "#Sink")
 
@@ -62,7 +61,16 @@ package object util {
           case ref @ (_: WRef | _: WSubField) => refs += ref
           case nested @ (_: Mux | _: DoPrim | _: ValidIf) => nested map rec
           case ignore @ (_: Literal) => // Do nothing
-          case unexpected => throwInternalError()
+          case subidx @ (_: SubIndex) => rec(subidx.expr)
+          case unexpected => {
+            import scala.reflect.ClassTag
+            
+            def f[T](v: T)(implicit ev: ClassTag[T]) = {
+              ev.toString
+            }
+
+            throwInternalError(s"extractRefs on (${f(unexpected)})'${e.serialize}'")
+          }
         }
         e
       }
@@ -147,7 +155,7 @@ package object util {
 
       // Add all ports as vertices
       mod.ports.foreach {
-        case Port(_, name, _, _: GroundType) => depGraph.addVertex(LogicNode(mod.name, name))
+        case Port(_, name, _, _) => depGraph.addVertex(LogicNode(mod.name, name))
         case other => {
           import scala.reflect.ClassTag
           

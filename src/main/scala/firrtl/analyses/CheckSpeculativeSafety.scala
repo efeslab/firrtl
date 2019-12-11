@@ -36,6 +36,7 @@ import firrtl.ir._
 import firrtl.Mappers._
 // Dependency graph
 import firrtl.graph._
+import firrtl.annotations.transforms._
 import firrtl.util.{DependencyGraph, LogicNode}
 // Other
 import firrtl.Utils.throwInternalError
@@ -54,7 +55,9 @@ import scala.collection.mutable
  *   asserts all register resets.
  *
  */
-case class RegisterResetInfo(moduleName: String, depGraph: DiGraph[LogicNode]) {
+case class RegisterResetInfo(moduleName: String, 
+                             depGraph: DiGraph[LogicNode],
+                             resetSignalInfo: Map[String, ResetSignalInfo]) {
   private val regDefs = mutable.Set[LogicNode]()
   private val regNames = mutable.Set[String]()
   private val regResets = mutable.Set[LogicNode]()
@@ -64,11 +67,16 @@ case class RegisterResetInfo(moduleName: String, depGraph: DiGraph[LogicNode]) {
   private val inputNames = mutable.Set[String]()
   
   def addRegisterDef(r: DefRegister): Unit = {
-    regDefs += LogicNode(moduleName, r.name)
-    if (r.name == "id_reg_fence") println(s"${r.serialize}")
-    regNames += r.name
-    regResetExpr += r.reset
-    regResets ++= DependencyGraph.extractRefs(r.reset).map(e => LogicNode(moduleName, e))
+    if (resetSignalInfo contains r.name) {
+      regDefs += LogicNode(moduleName, r.name)
+      regNames += r.name
+      val resetExpr = resetSignalInfo(r.name).resetSignal
+      regResetExpr += resetExpr
+      regResets ++= DependencyGraph.extractRefs(resetExpr).map(e => LogicNode(moduleName, e))
+      println(s"+\t${r.name} in map")
+    } else {
+      println(s"-\t${r.name} not in map")
+    }
   }
 
   def addRegAssignment(s: Statement): Unit = s match {
@@ -146,8 +154,8 @@ case class RegisterResetInfo(moduleName: String, depGraph: DiGraph[LogicNode]) {
   def serialize: String = {
     if (regDefs.isEmpty) "has no registers"
     else if (!regResetsConnected) "has registers with disconnected resets"
-    else if (regRegDepsExist) "has register-register reset dependencies"
     else if (!regResetDirect) "has indirect reset signals for registers"
+    else if (regRegDepsExist) "has register-register reset dependencies"
     else "has NO clue!!!"
   }
 }
@@ -155,7 +163,9 @@ case class RegisterResetInfo(moduleName: String, depGraph: DiGraph[LogicNode]) {
 /*
  * This [[ModuleSafetyInfo]] class does some stuff.
  */
-case class ModuleSafetyInfo(moduleName: String, depGraph: DiGraph[LogicNode]) {
+case class ModuleSafetyInfo(moduleName: String, 
+                            depGraph: DiGraph[LogicNode],
+                            regResetInfoMap: Map[String, ResetSignalInfo]) {
   // Tracking info about submodules
   private val submodules = mutable.Set[String]()
   private val submoduleInfo = mutable.Map[String, ModuleSafetyInfo]()
@@ -164,7 +174,7 @@ case class ModuleSafetyInfo(moduleName: String, depGraph: DiGraph[LogicNode]) {
   private val regDefs = mutable.Set[LogicNode]()
   // Tracks nodes that aren't reset by the signal
   private val resetSignal = mutable.Map[LogicNode, Set[LogicNode]]()
-  private val regInfo = new RegisterResetInfo(moduleName, depGraph)
+  private val regInfo = new RegisterResetInfo(moduleName, depGraph, regResetInfoMap)
   
   // Safety information about the immediate module.
   private var hasMemory: Boolean = false
@@ -278,12 +288,6 @@ class CheckSpeculativeSafety extends Transform {
     * and its form, as well as other related data.
     */
   def execute(state: CircuitState): CircuitState = {
-    import firrtl.annotations.transforms._
-    val annotations = state.annotations.collect({case a: ResetSignalInfo => a})
-
-    annotations.foreach(x => println(x.serialize))
-
-    return state
 
     val ledger = new Ledger()
     val circuit = state.circuit
@@ -322,7 +326,9 @@ class CheckSpeculativeSafety extends Transform {
     m map walkSubmodules(state, ledger)
 
     val depGraph: DiGraph[LogicNode] = DependencyGraph(state.circuit)
-    val modInfo = new ModuleSafetyInfo(m.name, depGraph)
+    val annotations = state.annotations.collect(
+                      {case a: ResetSignalInfo => a}).map(a => a.regName -> a).toMap
+    val modInfo = new ModuleSafetyInfo(m.name, depGraph, annotations)
     /*
      * Now, we check this module.
      *
