@@ -67,6 +67,7 @@ case class RegisterResetInfo(circuitNameStr: String,
   private var hasRegs: Boolean = false
   private var hasUnclearValue: Boolean = false
   private var hasIndirectReset: Boolean = false
+  private var hasIndeterminate: Boolean = false
   
   def addInputPort(p: Port): Unit = p match {
     case Port(_, name, direction, _) if direction.serialize == "input" => {
@@ -97,6 +98,7 @@ case class RegisterResetInfo(circuitNameStr: String,
         case Some(s) => s
         case None => {
           println(s"Can't find rename for ${r.name}. Abort")
+          hasIndeterminate = true
           return
           Nil
         }
@@ -135,17 +137,20 @@ case class RegisterResetInfo(circuitNameStr: String,
   def hasRegisters: Boolean = hasRegs
 
   def isSafe: Boolean = {
-    !hasRegs || (!hasIndirectReset && !hasUnclearValue)
+    !hasRegs || (!hasIndirectReset && !hasUnclearValue && !hasIndeterminate)
   }
 
   def hasBadReset: Boolean = {
     hasIndirectReset || hasUnclearValue
   }
 
+  def hasIndeterminateRegs: Boolean = hasIndeterminate
+
   def serialize: String = {
     if (!hasRegs) "has no registers"
     else if (!isSafe) "is flash-cleared"
     else if (hasIndirectReset) "has indirect reset"
+    else if (hasIndeterminate) "has indeterminate registers"
     else if (hasUnclearValue) "has unclear init values"
     else "has NO clue!!!"
   }
@@ -199,6 +204,7 @@ case class ModuleSafetyInfo(circuitName: String,
   def hasBadMemory: Boolean = hasMemory
   def hasBadRegisters: Boolean = !regInfo.isSafe
   def hasGoodRegisters: Boolean = regInfo.hasRegisters && regInfo.isSafe
+  def hasMysteryRegs: Boolean = regInfo.hasRegisters && regInfo.hasIndeterminateRegs
 
   def serialize: String = {
     val is_safe = if (isSafe) "is safe" else "is not safe"
@@ -245,6 +251,7 @@ class Ledger {
     val nStateless = moduleSafety.filter({case (x, y) => y.isStateless}).size
     val nStateful = moduleSafety.filter({case (x, y) => !y.isStateless}).size
     val nMemory = moduleSafety.filter({case (x, y) => y.hasBadMemory}).size
+    val nMystery = moduleSafety.filter({case (x, y) => y.hasMysteryRegs && !y.hasBadMemory}).size
     val nGoodReg = moduleSafety.filter({case (x, y) => y.hasGoodRegisters && !y.hasBadMemory}).size
     val nBadReg = moduleSafety.filter({case (x, y) => y.hasBadRegisters && !y.hasBadMemory}).size
 
@@ -255,8 +262,9 @@ class Ledger {
     val stateless = s"\t$nStateless/$nSafe of safe modules are stateless."
     val goodReg = s"\t$nGoodReg/$nSafe of safe modules are stateful and flash-cleared."
     val badMem = s"\t$nMemory/$nUnsafe of unsafe modules have memory."
+    val mysteryReg = s"\t$nMystery/$nUnsafe of unsafe modules have mysterious registers."
     val badReg = s"\t$nBadReg/$nUnsafe of unsafe modules have uncleared registers."
-    s"$str\n$ratio\n$stateless\n$goodReg\n$badMem\n$badReg"
+    s"$str\n$ratio\n$stateless\n$goodReg\n$badMem\n$mysteryReg\n$badReg"
   }
 }
 
