@@ -15,11 +15,6 @@ import firrtl.annotations._
 // Scala's mutable collections
 import scala.collection.mutable
 
-// Proto stuff
-import FirrtlProtos._
-import firrtl.proto._
-import firrtl.passes._
-
 /**
  * See [[firrtl.transforms.DontTouchAnnotation]] for inspiration.
  *
@@ -27,7 +22,9 @@ import firrtl.passes._
  * ReferenceTargets.
  */
 
-case class ResetSignalInfo(regName: String, 
+case class ResetSignalInfo(circuitName: String,
+                           moduleName: String,
+                           regName: String, 
                            resetSignal: Expression,
                            initValue: Expression) extends NoTargetAnnotation {
  
@@ -56,7 +53,7 @@ object ResetSignalInfo {
     case ex => ex // This might look like a case to use case _ => e, DO NOT!
   }
 
-  def apply(r: DefRegister): ResetSignalInfo = {
+  def apply(state: CircuitState, module: DefModule, r: DefRegister): ResetSignalInfo = {
     /*
     import scala.reflect.ClassTag
     
@@ -73,7 +70,7 @@ object ResetSignalInfo {
     val initProto = ToProto.convert(toExp(r.init)).build
     ResetSignalInfo(r.name, resetProto, initProto)
     */
-    ResetSignalInfo(r.name, r.reset, r.init)
+    ResetSignalInfo(state.circuit.main, module.name, r.name, r.reset, r.init)
   }
 }
 
@@ -82,7 +79,7 @@ case class AnnotationAccumulator(state: CircuitState) extends Serializable {
 
   def apply(m: DefModule, s: Statement): Statement = s match {
     case r: DefRegister => {
-      annotations += ResetSignalInfo(r)
+      annotations += ResetSignalInfo(state, m, r)
       s
     }
     case _ => s
@@ -116,7 +113,6 @@ class AddResetSignalInformation extends Transform {
     state.circuit map walkModule(accumulator)
 
     val newAnnotations = accumulator.toAnnotationSeq ++ state.annotations
-    println(accumulator.serialize)
     state.copy(annotations = newAnnotations)
   }
 

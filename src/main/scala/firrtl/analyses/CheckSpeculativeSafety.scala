@@ -36,6 +36,7 @@ import firrtl.ir._
 import firrtl.Mappers._
 // Dependency graph
 import firrtl.graph._
+import firrtl.annotations._
 import firrtl.annotations.transforms._
 import firrtl.util.{DependencyGraph, LogicNode}
 // Other
@@ -55,9 +56,11 @@ import scala.collection.mutable
  *   asserts all register resets.
  *
  */
-case class RegisterResetInfo(moduleName: String, 
+case class RegisterResetInfo(circuitNameStr: String,
+                             moduleNameStr: String, 
                              depGraph: DiGraph[LogicNode],
-                             resetSignalInfo: Map[String, ResetSignalInfo]) {
+                             resetSignalInfo: Map[String, ResetSignalInfo],
+                             renames: RenameMap) {
   private val inputPorts = mutable.Set[LogicNode]()
   private val inputNames = mutable.Set[String]()
 
@@ -67,37 +70,65 @@ case class RegisterResetInfo(moduleName: String,
   
   def addInputPort(p: Port): Unit = p match {
     case Port(_, name, direction, _) if direction.serialize == "input" => {
-      inputPorts += LogicNode(moduleName, p.name)
+      inputPorts += LogicNode(moduleNameStr, p.name)
       inputNames += p.name
     }
     case x => throwInternalError(s"'${x.serialize}' is not an input port!")
   }
 
   def addRegisterDef(r: DefRegister): Unit = {
-    if (resetSignalInfo contains r.name) {
+    val regName = if (resetSignalInfo contains r.name) {
+      r.name
+    } else {
+      val newModName = ModuleName(moduleNameStr, CircuitName(circuitNameStr))
+      val modNames: Seq[ModuleName] = renames.get(newModName) match {
+        case Some(s) => s
+        case None => Seq(newModName)
+      }
+
+      if (modNames.size != 1) throwInternalError(s"mod names == ${modNames.size}")
+
+      val modName = modNames.head
+
+      println(s"before ${newModName.name} after ${modName.name}")
+
+      val newName = ComponentName(r.name, modName)
+      val oldNames: Seq[ComponentName] = renames.get(newName) match {
+        case Some(s) => s
+        case None => {
+          println(s"Can't find rename for ${r.name}. Abort")
+          return
+          Nil
+        }
+      }
+
+      if (oldNames.size != 1) throwInternalError(s"# is ${oldNames.size}")
+
+      oldNames.head.name
+    }
+
+    if (resetSignalInfo contains regName) {
       if (inputPorts.isEmpty) throwInternalError("Need to parse ports first!")
 
       hasRegs = true
 
-      val resetExpr = resetSignalInfo(r.name).resetSignal
-      val initExpr = resetSignalInfo(r.name).initValue
+      val resetExpr = resetSignalInfo(regName).resetSignal
+      val initExpr = resetSignalInfo(regName).initValue
 
 
-      hasUnclearValue ||= DependencyGraph.extractRefs(initExpr).exists(_ match {
+      hasUnclearValue = hasUnclearValue || DependencyGraph.extractRefs(initExpr).exists(_ match {
         case r: Literal => false
-        case e if (inputPorts contains LogicNode(moduleName, e)) => false
+        case e if (inputPorts contains LogicNode(moduleNameStr, e)) => false
         case _ => true    
       })
 
-      hasIndirectReset ||= DependencyGraph.extractRefs(resetExpr).exists(_ match {
+      hasIndirectReset = hasIndirectReset || DependencyGraph.extractRefs(resetExpr).exists(_ match {
         case l: Literal => true
-        case e if (inputPorts contains LogicNode(moduleName, e)) => false
+        case e if (inputPorts contains LogicNode(moduleNameStr, e)) => false
         case _ => true    
       })
-
-      println(s"+\t${r.name} in map")
     } else {
-      println(s"-\t${r.name} not in map")
+      throwInternalError(s"${regName} is apparently meaningless")
     }
   }
 
@@ -107,10 +138,15 @@ case class RegisterResetInfo(moduleName: String,
     !hasRegs || (!hasIndirectReset && !hasUnclearValue)
   }
 
+  def hasBadReset: Boolean = {
+    hasIndirectReset || hasUnclearValue
+  }
+
   def serialize: String = {
     if (!hasRegs) "has no registers"
-    else if (!hasIndirectReset) "has indirect reset signals for registers"
-    else if (!hasUnclearValue) "has unclear init values"
+    else if (!isSafe) "is flash-cleared"
+    else if (hasIndirectReset) "has indirect reset"
+    else if (hasUnclearValue) "has unclear init values"
     else "has NO clue!!!"
   }
 }
@@ -118,16 +154,19 @@ case class RegisterResetInfo(moduleName: String,
 /*
  * This [[ModuleSafetyInfo]] class does some stuff.
  */
-case class ModuleSafetyInfo(moduleName: String, 
+case class ModuleSafetyInfo(circuitName: String,
+                            moduleName: String, 
                             depGraph: DiGraph[LogicNode],
-                            regResetInfoMap: Map[String, ResetSignalInfo]) {
+                            regResetInfoMap: Map[String, ResetSignalInfo],
+                            renames: RenameMap) {
   // Tracking info about submodules
   private val submodules = mutable.Set[String]()
   private val submoduleInfo = mutable.Map[String, ModuleSafetyInfo]()
 
   // Tracking info about registers, so we can later do dependency analysis.
   // Tracks nodes that aren't reset by the signal
-  private val regInfo = new RegisterResetInfo(moduleName, depGraph, regResetInfoMap)
+  private val regInfo = new RegisterResetInfo(circuitName, moduleName, 
+                                            depGraph, regResetInfoMap, renames)
   
   // Safety information about the immediate module.
   private var hasMemory: Boolean = false
@@ -155,6 +194,11 @@ case class ModuleSafetyInfo(moduleName: String,
     val submoduleSafety: Boolean = submodules.map(x => submoduleInfo(x).isSafe).forall(x => x) 
     submoduleSafety && !isImmediatelyUnsafe
   }
+
+  def isStateless: Boolean = !hasMemory && !regInfo.hasRegisters
+  def hasBadMemory: Boolean = hasMemory
+  def hasBadRegisters: Boolean = !regInfo.isSafe
+  def hasGoodRegisters: Boolean = regInfo.hasRegisters && regInfo.isSafe
 
   def serialize: String = {
     val is_safe = if (isSafe) "is safe" else "is not safe"
@@ -195,9 +239,24 @@ class Ledger {
   }
 
   def serialize: String = {
-    moduleSafety map { case (modName, modInfo) =>
+    val nTotal = moduleSafety.size
+    val nSafe = moduleSafety.filter({case (x, y) => y.isSafe}).size
+    val nUnsafe = nTotal - nSafe
+    val nStateless = moduleSafety.filter({case (x, y) => y.isStateless}).size
+    val nStateful = moduleSafety.filter({case (x, y) => !y.isStateless}).size
+    val nMemory = moduleSafety.filter({case (x, y) => y.hasBadMemory}).size
+    val nGoodReg = moduleSafety.filter({case (x, y) => y.hasGoodRegisters && !y.hasBadMemory}).size
+    val nBadReg = moduleSafety.filter({case (x, y) => y.hasBadRegisters && !y.hasBadMemory}).size
+
+    val str = moduleSafety map { case (modName, modInfo) =>
       s"$modName => ${modInfo.serialize}"
-    } mkString "\n"
+    } mkString s"\n"
+    val ratio = s"Overall, $nSafe/$nTotal modules are safe."
+    val stateless = s"\t$nStateless/$nSafe of safe modules are stateless."
+    val goodReg = s"\t$nGoodReg/$nSafe of safe modules are stateful and flash-cleared."
+    val badMem = s"\t$nMemory/$nUnsafe of unsafe modules have memory."
+    val badReg = s"\t$nBadReg/$nUnsafe of unsafe modules have uncleared registers."
+    s"$str\n$ratio\n$stateless\n$goodReg\n$badMem\n$badReg"
   }
 }
 
@@ -248,9 +307,14 @@ class CheckSpeculativeSafety extends Transform {
      *   - discard the returned new [[firrtl.ir.Circuit Circuit]] because circuit is unmodified
      */
     val depGraph: DiGraph[LogicNode] = DependencyGraph(state.circuit)
+
+    // These annotations have the old names in them. We need to create a mapping 
+    // between these old names and the new ones.
     val annotations = state.annotations.collect(
                       {case a: ResetSignalInfo => a}).map(a => a.regName -> a).toMap
-    circuit map walkModule(state, depGraph, annotations, ledger)
+
+    circuit map walkModule(state, depGraph, annotations, 
+      state.renames.getOrElse(RenameMap()).getReverseRenameMap, ledger)
 
     // Print our ledger
     println(ledger.serialize)
@@ -261,7 +325,8 @@ class CheckSpeculativeSafety extends Transform {
 
   /** Deeply visits every [[firrtl.ir.Statement Statement]] in m. */
   def walkModule(state: CircuitState, depGraph: DiGraph[LogicNode], 
-                 annotations: Map[String, ResetSignalInfo], ledger: Ledger)
+                 annotations: Map[String, ResetSignalInfo], 
+                 renames: RenameMap, ledger: Ledger)
                 (m: DefModule): DefModule = {
     /*
      * Check if we've done this one before. If so, terminate.
@@ -275,9 +340,10 @@ class CheckSpeculativeSafety extends Transform {
      * We do a depth-first search so we accumulate all the submodule information
      * before computing the safety of this module.
      */
-    m map walkSubmodules(state, depGraph, annotations, ledger)
+    m map walkSubmodules(state, depGraph, annotations, renames, ledger)
 
-    val modInfo = new ModuleSafetyInfo(m.name, depGraph, annotations)
+    val modInfo = new ModuleSafetyInfo(state.circuit.main, m.name, depGraph, annotations, 
+                                       renames)
 
     m map walkPorts(state, depGraph, m.name, modInfo)
     
@@ -319,7 +385,8 @@ class CheckSpeculativeSafety extends Transform {
   }
 
   def walkSubmodules(state: CircuitState, depGraph: DiGraph[LogicNode],
-                     annotations: Map[String, ResetSignalInfo], ledger: Ledger)
+                     annotations: Map[String, ResetSignalInfo], 
+                     renames: RenameMap, ledger: Ledger)
                     (s: Statement): Statement = {
     /*
      * Examine the statement. If it is an instance statement, it instantiates a
@@ -329,7 +396,7 @@ class CheckSpeculativeSafety extends Transform {
       case DefInstance(_, _, mName) => {
         state.circuit.modules.find(m => m.name == mName) match {
           case None => None
-          case Some(module) => walkModule(state, depGraph, annotations, ledger)(module)
+          case Some(module) => walkModule(state, depGraph, annotations, renames, ledger)(module)
         }
       }
       case notinst => notinst

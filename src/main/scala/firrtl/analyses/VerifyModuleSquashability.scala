@@ -7,6 +7,7 @@ import firrtl.ir._
 // Map functions
 import firrtl.Mappers._
 
+import firrtl.passes._
 import firrtl.annotations.transforms.AddResetSignalInformation
 import firrtl.analyses.CheckSpeculativeSafety
 
@@ -19,6 +20,7 @@ class VerifyModuleSquashability extends SeqTransform {
   def outputForm = LowForm
 
   def transforms = Seq(
+    passes.Uniquify,
     new AddResetSignalInformation, 
     new MiddleFirrtlToLowFirrtl,
     new CheckSpeculativeSafety)
