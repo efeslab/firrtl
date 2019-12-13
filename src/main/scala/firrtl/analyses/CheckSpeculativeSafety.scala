@@ -98,6 +98,7 @@ case class RegisterResetInfo(circuitNameStr: String,
         case Some(s) => s
         case None => {
           println(s"Can't find rename for ${r.name}. Abort")
+          hasRegs = true
           hasIndeterminate = true
           return
           Nil
@@ -147,8 +148,10 @@ case class RegisterResetInfo(circuitNameStr: String,
   def hasIndeterminateRegs: Boolean = hasIndeterminate
 
   def serialize: String = {
+    // Safe
     if (!hasRegs) "has no registers"
-    else if (!isSafe) "is flash-cleared"
+    else if (isSafe) "is flash-cleared"
+    // Unsafe
     else if (hasIndirectReset) "has indirect reset"
     else if (hasIndeterminate) "has indeterminate registers"
     else if (hasUnclearValue) "has unclear init values"
@@ -264,7 +267,8 @@ class Ledger {
     val badMem = s"\t$nMemory/$nUnsafe of unsafe modules have memory."
     val mysteryReg = s"\t$nMystery/$nUnsafe of unsafe modules have mysterious registers."
     val badReg = s"\t$nBadReg/$nUnsafe of unsafe modules have uncleared registers."
-    s"$str\n$ratio\n$stateless\n$goodReg\n$badMem\n$mysteryReg\n$badReg"
+    //s"$str\n$ratio\n$stateless\n$goodReg\n$badMem\n$mysteryReg\n$badReg"
+    s"$str\n$ratio\n$stateless\n$goodReg\n$badMem\n$badReg"
   }
 }
 
