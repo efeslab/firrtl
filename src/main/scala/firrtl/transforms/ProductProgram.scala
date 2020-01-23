@@ -11,10 +11,9 @@ import firrtl.Mappers._
 import scala.collection.mutable
 
 
-/** Punch out annotated ports out to the toplevel of the circuit.
-    This also has an option to pass a function as a parmeter to generate
-    custom output files as a result of the additional ports
-  * @note This *does* work for deduped modules
+/** Creates a product program according to Iodine's definition.
+  * Each original variable x is duplicated to x_r, and statements using
+  * x are duplicated to use x_r
   */
 class ProductProgram extends Transform {
   def inputForm: CircuitForm = LowForm

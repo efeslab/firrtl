@@ -10,8 +10,8 @@ import scala.collection.mutable
 
 
 /** Adds a shadow liveness variable to each variable in a circuit, according
-  * to Iodine's definition.
-  * Should be used before ProductProgram
+  * to Iodine's definition. That is, for a variable x, x_liveness is created
+  * and set to 1 if it control- or data-dependent on a live value
   */
 class AddLivenessShadowVariables extends Transform {
   def inputForm: CircuitForm = LowForm
